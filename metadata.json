@@ -1,0 +1,31 @@
+{
+  "inspired_by": "ConardLi/garden-skills",
+  "project_name": "Skill Garden",
+  "description": "Browsable explorer for Claude Skills across the Trollefsen household. Walks every skill dir on the VPS (~/.claude/skills, shared/skills, per-agent dirs) AND parses session JSONL transcripts to surface real usage data — invocations per agent, last-used timestamps, per-agent skill matrix. Not a static gallery; a living picture of what's actually running.",
+  "tech_stack": [
+    "Next.js 15",
+    "TypeScript",
+    "Tailwind CSS",
+    "Static export"
+  ],
+  "build_date": "2026-04-29",
+  "build_time_hours": 2,
+  "status": "complete",
+  "visibility": "private",
+  "features": [
+    "Filesystem scan of 39 skills across 7 dirs (user, shared, 5 agent dirs)",
+    "JSONL parser extracts real invocation data from session transcripts (1800+ recorded invocations across the household)",
+    "Card grid with per-skill usage badges — total invocations, last-used relative time, who used it",
+    "Agent matrix view — agents × skills, color-coded by ownership (own / shared / absent), with per-agent invocation counts",
+    "Full-text search across SKILL.md content (name + description + body)",
+    "Filter by owner (user/shared/agent) and by which agent uses it",
+    "Sort by name / invocations / most-recently-used",
+    "SKILL.md preview modal with full markdown rendering",
+    "Copy-as-prompt button — exports skill name + description + full SKILL.md as a Claude-ready prompt",
+    "Dark terminal aesthetic with agent-colored borders (Wilson cyan, Eve orange, Pepper pink, Radar purple, C-3PO yellow)",
+    "Build-time data extraction — zero runtime queries, fully static export"
+  ],
+  "live_url": "https://mvp.trollefsen.com/2026-04-29-skill-garden/",
+  "github_url": "https://github.com/da-troll/skill-garden",
+  "demo_video_url": "https://clawdash.trollefsen.com/media/mvps/2026-04-29-skill-garden/demo-20260429T221330.mp4"
+}
