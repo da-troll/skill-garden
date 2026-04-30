@@ -156,10 +156,6 @@ function mergeHitsToSkills(hits: RawHit[]): Skill[] {
     const { owner: canonicalOwner, ownerLabel } = pickCanonicalOwner(locations);
     const canonical = locations.find((l) => l.owner === canonicalOwner) || locations[0];
 
-    const agentLocCount = locations.filter((l) => l.owner !== 'shared').length;
-    const inShared = locations.some((l) => l.owner === 'shared');
-    const isPromotionCandidate = agentLocCount >= 3 && !inShared;
-
     skills.push({
       id: key,
       name: bestName,
@@ -170,7 +166,7 @@ function mergeHitsToSkills(hits: RawHit[]): Skill[] {
       body: bestBody,
       path: canonical.realpath,
       locations,
-      isPromotionCandidate,
+      isPromotionCandidate: false, // computed after usage scan
       invocations: 0,
       lastInvokedAt: null,
       invokedBy: {},
@@ -232,7 +228,17 @@ function scanSessionsForUsage(skills: Skill[]) {
             const cmd: string = tu.input.command;
             const cmdLower = cmd.toLowerCase();
             for (const [lname, s] of byName.entries()) {
-              if (cmdLower.includes(`/${lname}/`) || cmdLower.includes(`skills/${lname}`)) {
+              // Strict: must be a skills-context path. Plain "/lname/" matches
+              // any path on the VPS containing that segment (e.g. the Obsidian
+              // vault at /home/eve/obsidian/ produced ~165 false positives for
+              // the "obsidian" skill). Require an explicit "skills/<name>/"
+              // anchor.
+              if (
+                cmdLower.includes(`/skills/${lname}/`) ||
+                cmdLower.includes(`/skills/${lname}\n`) ||
+                cmdLower.includes(`/skills/${lname} `) ||
+                cmdLower.endsWith(`/skills/${lname}`)
+              ) {
                 s.invocations++;
                 s.invokedBy[agentId] = (s.invokedBy[agentId] || 0) + 1;
                 if (ts && (!s.lastInvokedAt || ts > s.lastInvokedAt)) s.lastInvokedAt = ts;
@@ -291,6 +297,16 @@ function main() {
   scanSessionsForUsage(skills);
   const totalInvocations = skills.reduce((n, s) => n + s.invocations, 0);
   console.log(`[prebuild] usage scan complete — ${totalInvocations} invocations recorded`);
+
+  // Promotion candidates: used by 2+ distinct agents but not in shared dir.
+  // (Captures genuine cross-household demand, regardless of how many agent
+  // dirs the skill physically lives in. Filesystem dedup is a weaker signal
+  // than real invocation data.)
+  for (const s of skills) {
+    const inShared = s.locations.some((l) => l.owner === 'shared');
+    const distinctAgentUsers = Object.keys(s.invokedBy).filter((a) => a !== 'unknown').length;
+    s.isPromotionCandidate = !inShared && distinctAgentUsers >= 2;
+  }
 
   const matrix = buildMatrix(skills);
 
