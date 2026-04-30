@@ -6,8 +6,7 @@ const AGENT_COLORS: Record<string, string> = {
   pepper: '#FF9CC2',
   radar: '#C4A8FF',
   c3po: '#FFE36E',
-  shared: '#888',
-  user: '#7CFFB2',
+  shared: '#7CFFB2',
 };
 
 export function agentColor(owner: string): string {
@@ -15,8 +14,7 @@ export function agentColor(owner: string): string {
 }
 
 export function ownerLabel(owner: string, fallback: string): string {
-  if (owner === 'user') return 'user · ~/.claude';
-  if (owner === 'shared') return 'shared · household';
+  if (owner === 'shared') return 'shared · all agents';
   return `${fallback} · agent`;
 }
 

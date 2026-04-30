@@ -17,13 +17,29 @@ export default function SkillCard({ skill, onSelect }: { skill: any; onSelect: (
           <h3 className="font-semibold text-ink truncate">{skill.name}</h3>
           <p className="text-dim text-[11px] uppercase tracking-wide mt-0.5">
             {ownerLabel(skill.owner, skill.ownerLabel)}
+            {skill.locations && skill.locations.length > 1 && (
+              <span className="text-dim/70 normal-case ml-1">
+                · also in {skill.locations.length - 1} other{skill.locations.length === 2 ? '' : 's'}
+              </span>
+            )}
           </p>
         </div>
-        {totalInvocations > 0 && (
-          <span className="shrink-0 text-accent text-xs px-2 py-0.5 rounded-sm bg-accent/10 border border-accent/20">
-            {totalInvocations}×
-          </span>
-        )}
+        <div className="flex flex-col items-end gap-1 shrink-0">
+          {totalInvocations > 0 && (
+            <span className="text-accent text-xs px-2 py-0.5 rounded-sm bg-accent/10 border border-accent/20">
+              {totalInvocations}×
+            </span>
+          )}
+          {skill.isPromotionCandidate && (
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded-sm border"
+              style={{ borderColor: '#FFD580', color: '#FFD580', background: 'rgba(255,213,128,0.08)' }}
+              title="In 3+ agent dirs but not in shared — consider promoting"
+            >
+              promote?
+            </span>
+          )}
+        </div>
       </div>
 
       <p className="text-sm text-ink/80 line-clamp-3">

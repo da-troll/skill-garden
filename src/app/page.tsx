@@ -27,12 +27,17 @@ export default function Home() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     let arr = skillsData.skills.filter((s) => {
-      if (ownerFilter !== 'all' && s.owner !== ownerFilter) return false;
+      if (ownerFilter === 'promote') {
+        if (!s.isPromotionCandidate) return false;
+      } else if (ownerFilter !== 'all' && s.owner !== ownerFilter) {
+        return false;
+      }
       if (agentFilter !== 'all') {
-        // Show skills used by this agent OR owned by this agent
+        // Show skills used by this agent OR owned by this agent OR present in their dir
         const usedBy = (s.invokedBy as Record<string, number>)[agentFilter] || 0;
         const ownedBy = s.owner === agentFilter;
-        if (!usedBy && !ownedBy) return false;
+        const inAgentDir = (s.locations || []).some((l) => l.owner === agentFilter);
+        if (!usedBy && !ownedBy && !inAgentDir) return false;
       }
       if (!q) return true;
       const blob = (s.name + ' ' + s.description + ' ' + s.body).toLowerCase();
@@ -66,6 +71,14 @@ export default function Home() {
           <p className="text-dim text-sm mt-2">
             {skillCount} skills · {totalInvocations.toLocaleString()} invocations across the household ·
             indexed {generatedAt} CET
+            {skillsData.totals.promotion_candidate_count > 0 && (
+              <>
+                {' · '}
+                <span style={{ color: '#FFD580' }}>
+                  {skillsData.totals.promotion_candidate_count} promotion candidate{skillsData.totals.promotion_candidate_count === 1 ? '' : 's'}
+                </span>
+              </>
+            )}
           </p>
         </div>
         <div className="flex gap-2 text-sm">
@@ -93,8 +106,8 @@ export default function Home() {
             />
             <select value={ownerFilter} onChange={(e) => setOwnerFilter(e.target.value)} className="bg-panel border border-edge rounded-sm px-2 py-2 text-sm">
               <option value="all">all owners</option>
-              <option value="user">user (~/.claude)</option>
               <option value="shared">shared</option>
+              <option value="promote">promotion candidates</option>
               {skillsData.agents.map((a) => (<option key={a.id} value={a.id}>{a.label}</option>))}
             </select>
             <select value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)} className="bg-panel border border-edge rounded-sm px-2 py-2 text-sm">

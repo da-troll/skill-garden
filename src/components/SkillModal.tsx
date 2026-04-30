@@ -34,10 +34,27 @@ export default function SkillModal({
         <header className="border-b border-edge px-5 py-4 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="text-xl font-semibold text-ink">{skill.name}</h2>
-            <p className="text-dim text-xs mt-1 truncate">{skill.path}</p>
             <p className="text-[11px] uppercase tracking-wide mt-1" style={{ color: agentColor(skill.owner) }}>
               {ownerLabel(skill.owner, skill.ownerLabel)}
+              {skill.isPromotionCandidate && (
+                <span className="ml-2 normal-case" style={{ color: '#FFD580' }}>
+                  · promote? (in {skill.locations.length} agent dirs, not shared)
+                </span>
+              )}
             </p>
+            {skill.locations && skill.locations.length > 0 ? (
+              <div className="mt-2 flex flex-col gap-0.5">
+                {skill.locations.map((loc: any) => (
+                  <p key={loc.realpath} className="text-dim text-[11px] truncate" title={loc.realpath}>
+                    <span style={{ color: agentColor(loc.owner) }}>{loc.ownerLabel}</span>
+                    {' · '}
+                    <span className="text-dim/80">{loc.path}</span>
+                  </p>
+                ))}
+              </div>
+            ) : (
+              <p className="text-dim text-xs mt-1 truncate">{skill.path}</p>
+            )}
           </div>
           <div className="flex gap-2 shrink-0">
             <button

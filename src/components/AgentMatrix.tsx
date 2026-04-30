@@ -7,7 +7,7 @@ export default function AgentMatrix({
   skills,
   onSelect,
 }: {
-  matrix: Record<string, Record<string, 'own' | 'shared' | 'user' | 'absent'>>;
+  matrix: Record<string, Record<string, 'own' | 'shared' | 'absent'>>;
   agents: { id: string; label: string; color: string }[];
   skills: any[];
   onSelect: (skillName: string) => void;
@@ -29,7 +29,6 @@ export default function AgentMatrix({
   const cellStyle = (state: string, hasUsage: boolean) => {
     if (state === 'own') return { background: 'rgba(124,255,178,0.15)', color: '#7CFFB2', borderColor: 'rgba(124,255,178,0.35)' };
     if (state === 'shared') return { background: hasUsage ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)', color: '#888', borderColor: '#1f1f1f' };
-    if (state === 'user') return { background: 'rgba(255,255,255,0.02)', color: '#888', borderColor: '#1f1f1f' };
     return { background: '#0d0d0d', color: '#444', borderColor: '#141414' };
   };
 
@@ -84,8 +83,8 @@ export default function AgentMatrix({
         </tbody>
       </table>
       <div className="px-3 py-2 text-[10px] text-dim border-t border-edge bg-bg flex flex-wrap gap-3">
-        <span><span className="text-accent">✓</span> = installed in agent's own dir</span>
-        <span><span className="text-dim">·</span> = available via shared/user (visible to all)</span>
+        <span><span className="text-accent">✓</span> = installed in agent&apos;s own dir</span>
+        <span><span className="text-dim">·</span> = available via shared (visible to all)</span>
         <span><span className="text-dim">—</span> = absent</span>
         <span><span className="text-accent">N×</span> = invocation count from JSONL scan</span>
       </div>

@@ -1,13 +1,20 @@
 /**
- * Prebuild: walks all known skill dirs, extracts SKILL.md content + frontmatter,
- * scans JSONL session transcripts for skill invocations, writes a single JSON
- * blob to src/data/skills.json that the static UI imports at build time.
+ * Prebuild: walks all known skill dirs, deduplicates by skill name + inode,
+ * merges multi-location occurrences into single records, scans JSONL session
+ * transcripts for invocations, and writes src/data/skills.json.
  *
- * Data sources:
- *   - User skills:   ~/.claude/skills
- *   - Shared skills: /home/eve/workspaces/shared/skills
- *   - Per-agent:     /home/eve/workspaces/<agent>/skills (if exists)
- *   - Sessions:      /home/eve/.claude/projects/-*-<agent>-* / *.jsonl
+ * Owner tiers:
+ *   - 'shared': either ~/.claude/skills (Claude Code's auto-loaded skill registry,
+ *     visible to ALL agents) or /home/eve/workspaces/shared/skills (household-shared).
+ *     Both are functionally equivalent — available everywhere — and are merged
+ *     into one tier here.
+ *   - <agentId>: per-agent dirs (/home/eve/workspaces/<agent>/skills).
+ *
+ * Dedup order (per skill name, lowercased):
+ *   1. realpath dedup — different paths resolving to the same inode collapse.
+ *   2. name dedup — same name in different owners merges into one record with
+ *      a `locations[]` array. Canonical owner: 'shared' if any location is
+ *      shared, else first agent location encountered.
  *
  * Output: src/data/skills.json
  */
@@ -19,32 +26,43 @@ const HOME = os.homedir();
 
 const AGENTS = [
   { id: 'wilson', label: 'Wilson', color: 'wilson' },
-  { id: 'eve', label: 'Eve', color: 'eve' },
+  { id: 'eve',    label: 'Eve',    color: 'eve' },
   { id: 'pepper', label: 'Pepper', color: 'pepper' },
-  { id: 'radar', label: 'Radar', color: 'radar' },
-  { id: 'c3po', label: 'C-3PO', color: 'c3po' },
+  { id: 'radar',  label: 'Radar',  color: 'radar' },
+  { id: 'c3po',   label: 'C-3PO',  color: 'c3po' },
 ] as const;
 
-type Owner = typeof AGENTS[number]['id'] | 'user' | 'shared';
+type AgentId = typeof AGENTS[number]['id'];
+type Owner = AgentId | 'shared';
 
-interface Skill {
-  id: string;          // unique key (owner + name)
-  name: string;        // skill folder name
+interface Location {
   owner: Owner;
   ownerLabel: string;
-  description: string; // from frontmatter
-  body: string;        // raw SKILL.md (capped)
-  path: string;        // absolute path to SKILL.md
-  // usage stats from JSONL (best-effort; many will be 0)
-  invocations: number;       // total times invoked across all agents' sessions
+  path: string;        // path to SKILL.md as found (pre-realpath)
+  realpath: string;    // resolved inode-canonical path
+}
+
+interface Skill {
+  id: string;             // lowercased name (canonical)
+  name: string;
+  canonicalOwner: Owner;
+  ownerLabel: string;
+  // Backward-compat alias for components that still read skill.owner
+  owner: Owner;
+  description: string;
+  body: string;
+  path: string;
+  locations: Location[];
+  isPromotionCandidate: boolean;
+  invocations: number;
   lastInvokedAt: string | null;
-  invokedBy: Record<string, number>; // agent_id -> count
-  errors: number;            // tool_use failures referencing this skill
+  invokedBy: Record<string, number>;
+  errors: number;
 }
 
 const SKILL_DIRS: { dir: string; owner: Owner; ownerLabel: string }[] = [
-  { dir: path.join(HOME, '.claude/skills'), owner: 'user', ownerLabel: 'User' },
-  { dir: '/home/eve/workspaces/shared/skills', owner: 'shared', ownerLabel: 'Shared' },
+  { dir: path.join(HOME, '.claude/skills'),         owner: 'shared', ownerLabel: 'Shared' },
+  { dir: '/home/eve/workspaces/shared/skills',      owner: 'shared', ownerLabel: 'Shared' },
   ...AGENTS.map((a) => ({
     dir: `/home/eve/workspaces/${a.id}/skills`,
     owner: a.id as Owner,
@@ -66,55 +84,105 @@ function parseFrontmatter(text: string): { fm: Record<string, string>; body: str
   return { fm, body: m[2] };
 }
 
-function loadSkillsFromDir(dir: string, owner: Owner, ownerLabel: string): Skill[] {
+interface RawHit {
+  name: string;
+  description: string;
+  body: string;
+  location: Location;
+}
+
+function collectFromDir(dir: string, owner: Owner, ownerLabel: string): RawHit[] {
   if (!fs.existsSync(dir)) return [];
-  const out: Skill[] = [];
+  const out: RawHit[] = [];
   let entries: fs.Dirent[] = [];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
   for (const ent of entries) {
     if (!ent.isDirectory() && !ent.isSymbolicLink()) continue;
     const skillDir = path.join(dir, ent.name);
-    // Resolve symlinks safely
     let stat: fs.Stats;
     try { stat = fs.statSync(skillDir); } catch { continue; }
     if (!stat.isDirectory()) continue;
     const skillFile = path.join(skillDir, 'SKILL.md');
     if (!fs.existsSync(skillFile)) continue;
+    let realpath = skillFile;
+    try { realpath = fs.realpathSync(skillFile); } catch { /* keep raw */ }
     let raw = '';
     try { raw = fs.readFileSync(skillFile, 'utf8'); } catch { continue; }
     const { fm, body } = parseFrontmatter(raw);
-    const desc = fm.description || fm.summary || '';
+    const name = fm.name || ent.name;
+    const description = (fm.description || fm.summary || '').slice(0, 400);
     out.push({
-      id: `${owner}/${ent.name}`,
-      name: fm.name || ent.name,
-      owner,
-      ownerLabel,
-      description: desc.slice(0, 400),
+      name,
+      description,
       body: body.slice(0, 50_000),
-      path: skillFile,
+      location: { owner, ownerLabel, path: skillFile, realpath },
+    });
+  }
+  return out;
+}
+
+function pickCanonicalOwner(locations: Location[]): { owner: Owner; ownerLabel: string } {
+  // Prefer 'shared' if present, else the first agent location encountered.
+  const shared = locations.find((l) => l.owner === 'shared');
+  if (shared) return { owner: 'shared', ownerLabel: 'Shared' };
+  const first = locations[0];
+  return { owner: first.owner, ownerLabel: first.ownerLabel };
+}
+
+function mergeHitsToSkills(hits: RawHit[]): Skill[] {
+  const byName = new Map<string, RawHit[]>();
+  for (const h of hits) {
+    const key = h.name.toLowerCase();
+    const arr = byName.get(key);
+    if (arr) arr.push(h);
+    else byName.set(key, [h]);
+  }
+
+  const skills: Skill[] = [];
+  for (const [key, group] of byName) {
+    const seenReal = new Set<string>();
+    const locations: Location[] = [];
+    let bestDescription = '';
+    let bestBody = '';
+    const bestName = group[0].name;
+    for (const h of group) {
+      if (seenReal.has(h.location.realpath)) continue;
+      seenReal.add(h.location.realpath);
+      locations.push(h.location);
+      if (!bestDescription && h.description) bestDescription = h.description;
+      if (!bestBody && h.body) bestBody = h.body;
+    }
+
+    const { owner: canonicalOwner, ownerLabel } = pickCanonicalOwner(locations);
+    const canonical = locations.find((l) => l.owner === canonicalOwner) || locations[0];
+
+    const agentLocCount = locations.filter((l) => l.owner !== 'shared').length;
+    const inShared = locations.some((l) => l.owner === 'shared');
+    const isPromotionCandidate = agentLocCount >= 3 && !inShared;
+
+    skills.push({
+      id: key,
+      name: bestName,
+      canonicalOwner,
+      owner: canonicalOwner,
+      ownerLabel,
+      description: bestDescription,
+      body: bestBody,
+      path: canonical.realpath,
+      locations,
+      isPromotionCandidate,
       invocations: 0,
       lastInvokedAt: null,
       invokedBy: {},
       errors: 0,
     });
   }
-  return out;
+  return skills.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function scanSessionsForUsage(skills: Skill[]) {
-  // Index by name (case-insensitive) for fast lookup. Multiple skills with the
-  // same name (different owners) all get incremented — usage is per-name in JSONL.
-  const byName = new Map<string, Skill[]>();
-  for (const s of skills) {
-    const k = s.name.toLowerCase();
-    const arr = byName.get(k) || [];
-    arr.push(s);
-    byName.set(k, arr);
-  }
+  const byName = new Map<string, Skill>();
+  for (const s of skills) byName.set(s.name.toLowerCase(), s);
   if (byName.size === 0) return;
 
   const projectsDir = path.join(HOME, '.claude/projects');
@@ -124,21 +192,12 @@ function scanSessionsForUsage(skills: Skill[]) {
     .filter((d) => d.isDirectory())
     .map((d) => path.join(projectsDir, d.name));
 
-  // Identify which agent a project dir belongs to. Project dirs are like
-  // -home-eve-workspaces-wilson, -home-eve-workspaces-eve, etc.
   for (const pdir of projectDirs) {
-    // Project dirs are like -home-eve-workspaces-<agent> — match the LAST
-    // path-segment so we don't false-match (e.g. "-eve" inside another path).
-    const agentId =
-      AGENTS.find((a) => pdir.endsWith(`-${a.id}`))?.id || 'unknown';
+    const agentId = AGENTS.find((a) => pdir.endsWith(`-${a.id}`))?.id || 'unknown';
 
-    // JSONLs live directly in the project dir, not in a sessions/ subdir.
     let files: string[] = [];
-    try {
-      files = fs.readdirSync(pdir).filter((f) => f.endsWith('.jsonl'));
-    } catch { continue; }
+    try { files = fs.readdirSync(pdir).filter((f) => f.endsWith('.jsonl')); } catch { continue; }
 
-    // Cap at most-recent 50 files per agent; sufficient for usage signal.
     const sortedFiles = files
       .map((f) => ({ f, mtime: fs.statSync(path.join(pdir, f)).mtime.getTime() }))
       .sort((a, b) => b.mtime - a.mtime)
@@ -156,47 +215,38 @@ function scanSessionsForUsage(skills: Skill[]) {
         try { evt = JSON.parse(line); } catch { continue; }
         if (!evt) continue;
 
-        // Look for Skill tool invocations. Common shapes:
-        //   {"type":"tool_use","name":"Skill","input":{"skill":"<name>"}}
-        //   {"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"<name>"}}]}}
-        // Defensive: walk recursively to find tool_use blocks.
         const ts = evt.timestamp || evt.created_at || evt.message?.created_at || null;
         const toolUses = collectToolUses(evt);
         for (const tu of toolUses) {
           const name = tu.name || '';
-          // Skill tool: input.skill is the skill name
           if (name === 'Skill' || name === 'skill') {
             const skillName: string = (tu.input?.skill || tu.input?.name || '').toLowerCase();
             if (!skillName) continue;
-            const matches = byName.get(skillName);
-            if (!matches) continue;
-            for (const m of matches) {
-              m.invocations++;
-              m.invokedBy[agentId] = (m.invokedBy[agentId] || 0) + 1;
-              if (ts && (!m.lastInvokedAt || ts > m.lastInvokedAt)) m.lastInvokedAt = ts;
-            }
+            const s = byName.get(skillName);
+            if (!s) continue;
+            s.invocations++;
+            s.invokedBy[agentId] = (s.invokedBy[agentId] || 0) + 1;
+            if (ts && (!s.lastInvokedAt || ts > s.lastInvokedAt)) s.lastInvokedAt = ts;
           }
-          // Bash that calls a known skill script
           if (name === 'Bash' && tu.input?.command) {
             const cmd: string = tu.input.command;
-            for (const [lname, arr] of byName.entries()) {
-              if (cmd.toLowerCase().includes(`/${lname}/`) || cmd.toLowerCase().includes(`skills/${lname}`)) {
-                for (const m of arr) {
-                  m.invocations++;
-                  m.invokedBy[agentId] = (m.invokedBy[agentId] || 0) + 1;
-                  if (ts && (!m.lastInvokedAt || ts > m.lastInvokedAt)) m.lastInvokedAt = ts;
-                }
+            const cmdLower = cmd.toLowerCase();
+            for (const [lname, s] of byName.entries()) {
+              if (cmdLower.includes(`/${lname}/`) || cmdLower.includes(`skills/${lname}`)) {
+                s.invocations++;
+                s.invokedBy[agentId] = (s.invokedBy[agentId] || 0) + 1;
+                if (ts && (!s.lastInvokedAt || ts > s.lastInvokedAt)) s.lastInvokedAt = ts;
               }
             }
           }
         }
 
-        // Tool errors that mention a skill name
         const errText = JSON.stringify(evt.error || evt.message?.error || '');
         if (errText && errText.length < 5000) {
-          for (const [lname, arr] of byName.entries()) {
-            if (errText.toLowerCase().includes(`skill ${lname}`) || errText.toLowerCase().includes(`skill: ${lname}`)) {
-              for (const m of arr) m.errors++;
+          const errLower = errText.toLowerCase();
+          for (const [lname, s] of byName.entries()) {
+            if (errLower.includes(`skill ${lname}`) || errLower.includes(`skill: ${lname}`)) {
+              s.errors++;
             }
           }
         }
@@ -213,41 +263,40 @@ function collectToolUses(evt: any, acc: any[] = []): any[] {
   return acc;
 }
 
-function main() {
-  const allSkills: Skill[] = [];
-  for (const { dir, owner, ownerLabel } of SKILL_DIRS) {
-    allSkills.push(...loadSkillsFromDir(dir, owner, ownerLabel));
+function buildMatrix(skills: Skill[]) {
+  const matrix: Record<string, Record<string, 'own' | 'shared' | 'absent'>> = {};
+  for (const s of skills) {
+    const inShared = s.locations.some((l) => l.owner === 'shared');
+    const ownersWithDir = new Set(s.locations.map((l) => l.owner));
+    matrix[s.name] = {};
+    for (const a of AGENTS) {
+      if (ownersWithDir.has(a.id)) matrix[s.name][a.id] = 'own';
+      else if (inShared) matrix[s.name][a.id] = 'shared';
+      else matrix[s.name][a.id] = 'absent';
+    }
   }
-  console.log(`[prebuild] loaded ${allSkills.length} skills`);
+  return matrix;
+}
 
-  // De-dupe by id (collision-rare but possible if symlinks crisscross)
-  const seen = new Map<string, Skill>();
-  for (const s of allSkills) seen.set(s.id, s);
-  const skills = Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+function main() {
+  const allHits: RawHit[] = [];
+  for (const { dir, owner, ownerLabel } of SKILL_DIRS) {
+    allHits.push(...collectFromDir(dir, owner, ownerLabel));
+  }
+  console.log(`[prebuild] collected ${allHits.length} raw entries from ${SKILL_DIRS.length} dirs`);
+
+  const skills = mergeHitsToSkills(allHits);
+  console.log(`[prebuild] merged into ${skills.length} unique skills`);
 
   scanSessionsForUsage(skills);
   const totalInvocations = skills.reduce((n, s) => n + s.invocations, 0);
   console.log(`[prebuild] usage scan complete — ${totalInvocations} invocations recorded`);
 
-  // Per-agent matrix: which agents have which skills installed.
-  // For each skill, build a presence map across agents based on whether the
-  // skill exists in that agent's dir OR shared (which all agents see) OR user.
-  const sharedNames = new Set(skills.filter((s) => s.owner === 'shared' || s.owner === 'user').map((s) => s.name.toLowerCase()));
-  const agentNames: Record<string, Set<string>> = {};
-  for (const a of AGENTS) {
-    agentNames[a.id] = new Set(skills.filter((s) => s.owner === a.id).map((s) => s.name.toLowerCase()));
-  }
-  // Matrix entry: { skillName: { wilson: 'own'|'shared'|'absent', ... } }
-  const allNames = Array.from(new Set(skills.map((s) => s.name)));
-  const matrix: Record<string, Record<string, 'own' | 'shared' | 'user' | 'absent'>> = {};
-  for (const name of allNames) {
-    const lname = name.toLowerCase();
-    matrix[name] = {};
-    for (const a of AGENTS) {
-      if (agentNames[a.id].has(lname)) matrix[name][a.id] = 'own';
-      else if (sharedNames.has(lname)) matrix[name][a.id] = 'shared';
-      else matrix[name][a.id] = 'absent';
-    }
+  const matrix = buildMatrix(skills);
+
+  const promotionCandidates = skills.filter((s) => s.isPromotionCandidate).map((s) => s.name);
+  if (promotionCandidates.length > 0) {
+    console.log(`[prebuild] promotion candidates (3+ agent dirs, not shared): ${promotionCandidates.join(', ')}`);
   }
 
   const out = {
@@ -255,10 +304,13 @@ function main() {
     agents: AGENTS,
     skills,
     matrix,
+    promotion_candidates: promotionCandidates,
     totals: {
       skill_count: skills.length,
       invocation_count: totalInvocations,
-      agents_with_skills: AGENTS.filter((a) => agentNames[a.id].size > 0).length,
+      shared_count: skills.filter((s) => s.canonicalOwner === 'shared').length,
+      agent_owned_count: skills.filter((s) => s.canonicalOwner !== 'shared').length,
+      promotion_candidate_count: promotionCandidates.length,
     },
   };
   const outPath = path.join(__dirname, '..', 'src/data/skills.json');
